@@ -28,7 +28,7 @@ def construct_hyper_param(parser):
     parser.add_argument("--accumulate_gradients", default=1, type=int,
                         help="The number of accumulation of backpropagation to effectivly increase the batch size.")
     parser.add_argument('--fine_tune',
-                        default=False,
+                        default=True,
                         action='store_true',
                         help="If present, BERT is trained.")
 
@@ -49,7 +49,7 @@ def construct_hyper_param(parser):
     parser.add_argument('--lr_bert', default=1e-5, type=float, help='BERT model learning rate.')
     parser.add_argument('--seed',
                         type=int,
-                        default=42,
+                        default=1,
                         help="random seed for initialization")
     parser.add_argument('--no_pretraining', action='store_true', help='Use BERT pretrained model')
     parser.add_argument("--bert_type_abb", default='uS', type=str,
