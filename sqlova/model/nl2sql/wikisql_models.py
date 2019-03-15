@@ -22,8 +22,8 @@ class Seq2SQL_v1(nn.Module):
         super(Seq2SQL_v1, self).__init__()
         self.iS = iS
         self.hS = hS
-        self.ls = lS
-        self.dr = dr
+        self.ls = lS    # layer size = 2
+        self.dr = dr    # dropout
 
         self.max_wn = 4
         self.n_cond_ops = n_cond_ops
@@ -42,6 +42,19 @@ class Seq2SQL_v1(nn.Module):
                 g_sc=None, g_sa=None, g_wn=None, g_wc=None, g_wo=None, g_wvi=None,
                 show_p_sc=False, show_p_sa=False,
                 show_p_wn=False, show_p_wc=False, show_p_wo=False, show_p_wv=False):
+        """"
+        wemb_n: natural language embedding. [batch, seq_len, hidden * num_target_layers]
+        l_n: token lengths of each question (real seq_len of wemb_n)
+
+        wemb_hpu: header embedding. [table_header_amount_in_batch, max_length_header_token,  hidden * num_target_layers]
+        l_hpu: header token lengths (real seq_len of wemb_hpu)
+        l_hs: the number of columns (headers) of the tables.
+
+        g_sc ground true of select column; g_sa ground true of agg type;
+        g_wn ground true of the amount of where condition; g_wc ground true of where column;
+        g_wo ground true of where operator; g_wvi ground true of where value (put after operator) based on BERT token index
+        """
+
 
         # sc
         s_sc = self.scp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, show_p_sc=show_p_sc)
@@ -280,7 +293,11 @@ class Seq2SQL_v1(nn.Module):
         # s_wv = [B, max_wn, max_nlu_tokens, 2]
         return prob_sca, prob_w, prob_wn_w, pr_sc_best, pr_sa_best, pr_wn_based_on_prob, pr_sql_i
 
+
 class SCP(nn.Module):
+    """
+    Select Column Process
+    """
     def __init__(self, iS=300, hS=100, lS=2, dr=0.3):
         super(SCP, self).__init__()
         self.iS = iS

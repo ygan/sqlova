@@ -13,7 +13,7 @@ import random as python_random
 # import torchvision.datasets as dsets
 
 # BERT
-import bert.tokenization as tokenization
+from bert.tokenization import BertTokenizer
 from bert.modeling import BertConfig, BertModel
 
 from sqlova.utils.utils_wikisql import *
@@ -24,7 +24,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def construct_hyper_param(parser):
     parser.add_argument('--tepoch', default=200, type=int)
-    parser.add_argument("--bS", default=32, type=int,
+    parser.add_argument("--bS", default=8, type=int,
                         help="Batch size")
     parser.add_argument("--accumulate_gradients", default=1, type=int,
                         help="The number of accumulation of backpropagation to effectivly increase the batch size.")
@@ -52,7 +52,7 @@ def construct_hyper_param(parser):
                         type=int,
                         default=1,
                         help="random seed for initialization")
-    parser.add_argument('--no_pretraining', action='store_true', help='Use BERT pretrained model')
+    parser.add_argument('--my_pretrain_bert', action='store_true', help='Use BERT pretrained model')
     parser.add_argument("--bert_type_abb", default='uS', type=str,
                         help="Type of BERT model to load. e.g.) uS, uL, cS, cL, and mcS")
 
@@ -73,6 +73,7 @@ def construct_hyper_param(parser):
                         help="The size of beam for smart decoding")
 
     args = parser.parse_args()
+    args.fine_tune=True
 
     map_bert_type_abb = {'uS': 'uncased_L-12_H-768_A-12',
                          'uL': 'uncased_L-24_H-1024_A-16',
@@ -102,26 +103,27 @@ def construct_hyper_param(parser):
     return args
 
 
-def get_bert(BERT_PT_PATH, bert_type, do_lower_case, no_pretraining):
+def get_bert(BERT_PT_PATH, bert_type, do_lower_case, my_pretrain_bert):
 
+    # bert_config_file = os.path.join(BERT_PT_PATH, f'bert_config_{bert_type}.json')
+    # vocab_file = os.path.join(BERT_PT_PATH, f'vocab_{bert_type}.txt')
+    # init_checkpoint = os.path.join(BERT_PT_PATH, f'pytorch_model_{bert_type}.bin')
 
-    bert_config_file = os.path.join(BERT_PT_PATH, f'bert_config_{bert_type}.json')
-    vocab_file = os.path.join(BERT_PT_PATH, f'vocab_{bert_type}.txt')
-    init_checkpoint = os.path.join(BERT_PT_PATH, f'pytorch_model_{bert_type}.bin')
+    # bert_config = BertConfig.from_json_file(bert_config_file)
+    # tokenizer = tokenization.FullTokenizer(
+    #     vocab_file=vocab_file, do_lower_case=do_lower_case)
+    # bert_config.print_status()
 
+    # model_bert = BertModel(bert_config)
 
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=args.do_lower_case)
+    model_bert, bert_config = BertModel.from_pretrained('bert-base-uncased')
 
-    bert_config = BertConfig.from_json_file(bert_config_file)
-    tokenizer = tokenization.FullTokenizer(
-        vocab_file=vocab_file, do_lower_case=do_lower_case)
-    bert_config.print_status()
-
-    model_bert = BertModel(bert_config)
-    if no_pretraining:
-        pass
-    else:
+    if my_pretrain_bert:
         model_bert.load_state_dict(torch.load(init_checkpoint, map_location='cpu'))
         print("Load pre-trained parameters.")
+    else:
+        pass
     model_bert.to(device)
 
     return model_bert, tokenizer, bert_config
@@ -146,13 +148,14 @@ def get_models(args, BERT_PT_PATH, trained=False, path_model_bert=None, path_mod
     cond_ops = ['=', '>', '<', 'OP']  # do not know why 'OP' required. Hence,
 
     print(f"Batch_size = {args.bS * args.accumulate_gradients}")
+    print(f"Accumulate_gradients = {args.accumulate_gradients}")
     print(f"BERT parameters:")
     print(f"learning rate: {args.lr_bert}")
     print(f"Fine-tune BERT: {args.fine_tune}")
 
     # Get BERT
     model_bert, tokenizer, bert_config = get_bert(BERT_PT_PATH, args.bert_type, args.do_lower_case,
-                                                  args.no_pretraining)
+                                                  args.my_pretrain_bert)
     args.iS = bert_config.hidden_size * args.num_target_layers  # Seq-to-SQL input vector dimenstion
 
     # Get Seq-to-SQL
@@ -216,34 +219,51 @@ def train(train_loader, train_table, model, model_bert, opt, bert_config, tokeni
     engine = DBEngine(os.path.join(path_db, f"{dset_name}.db"))
 
     for iB, t in enumerate(train_loader):
+
+        # t is the whole line from *_tok.jsonl
+
         cnt += len(t)
 
         if cnt < st_pos:
             continue
         # Get fields
         nlu, nlu_t, sql_i, sql_q, sql_t, tb, hs_t, hds = get_fields(t, train_table, no_hs_t=True, no_sql_t=True)
-        # nlu  : natural language utterance
-        # nlu_t: tokenized nlu
-        # sql_i: canonical form of SQL query
+        # nlu  : natural language utterance. A whole sentence.
+        # nlu_t: tokenized nlu. token word of sentence, not numbers.
+        # sql_i: canonical form of SQL query. I saw it equal to sql_q
         # sql_q: full SQL query text. Not used.
-        # sql_t: tokenized SQL query
-        # tb   : table
+        # sql_t: tokenized SQL query. Now is none.
+        # tb   : table with content
         # hs_t : tokenized headers. Not used.
+        # hds  : head of table
+
 
         g_sc, g_sa, g_wn, g_wc, g_wo, g_wv = get_g(sql_i)
         # get ground truth where-value index under CoreNLP tokenization scheme. It's done already on trainset.
+
+        # g_sc select column; g_sa agg type; g_wn the amount of where condition;
+        # g_wc where column; g_wo where operator; g_wv where value (put after operator)
+
+
+
         g_wvi_corenlp = get_g_wvi_corenlp(t)
+        # the index of where value in NL. The index is a pair that show start index and stop index.
+
 
         wemb_n, wemb_h, l_n, l_hpu, l_hs, \
         nlu_tt, t_to_tt_idx, tt_to_t_idx \
             = get_wemb_bert(bert_config, model_bert, tokenizer, nlu_t, hds, max_seq_length,
                             num_out_layers_n=num_target_layers, num_out_layers_h=num_target_layers)
-
-        # wemb_n: natural language embedding
-        # wemb_h: header embedding
+        # wemb_n: natural language embedding. [batch, seq_len, hidden * num_target_layers]
+        # wemb_h: header embedding. [table_header_amount_in_batch, max_length_header_token,  hidden * num_target_layers]
+        #         The first and third dimension of wemb_h always have valid data. The second dimension may be not.
+        #         Invalid data will fill 0 in it. Use l_hpu for finding the valid data.
         # l_n: token lengths of each question
-        # l_hpu: header token lengths
-        # l_hs: the number of columns (headers) of the tables.
+        # l_hpu: header token lengths. This is a one dimension list contain several table header.
+        # l_hs: the number of columns (headers) of the tables. Can be used for split the first dimension of wemb_h.
+        # You can check encode_hpu in utils_wikisql.py for the reason of wemb_h and l_hpu. This design is good!
+
+
         try:
             #
             g_wvi = get_g_wvi_bert_from_g_wvi_corenlp(t_to_tt_idx, g_wvi_corenlp)
@@ -251,7 +271,15 @@ def train(train_loader, train_table, model, model_bert, opt, bert_config, tokeni
             # Exception happens when where-condition is not found in nlu_tt.
             # In this case, that train example is not used.
             # During test, that example considered as wrongly answered.
-            # e.g. train: 32.
+            # e.g. {"question":"What is the highest number of not usable satellites when there are more than 0 launch failures, less than 30 retired, and the block is I?",
+            #       "question_tok":["What","is","the","highest","number","of","not","usable","satellites","when","there","are","more","than","0","launch","failures",",","less","than","30","retired",",","and","the","block","is","I","?"],
+            #       "sql":{"sel":3,"conds":[[5,1,0],[4,2,30],[0,0,"block i"]],"agg":1},
+            #       "query":{"sel":3,"conds":[[5,1,0],[4,2,30],[0,0,"block i"]],"agg":1},
+            #       "wvi_corenlp":null,
+            #       "tok_error":"SQuAD style st, ed are not found under CoreNLP."}
+            # In example, the condition is 'block i' but NL is 'block is i'! So the "wvi_corenlp":null.
+            # If there is no condition, "wvi_corenlp" will be [] and will not cause except.
+            # If there is except, you will loss one batch training data.
             continue
 
         # score
@@ -548,10 +576,12 @@ if __name__ == '__main__':
     ## 1. Hyper parameters
     parser = argparse.ArgumentParser()
     args = construct_hyper_param(parser)
-
+    
     ## 2. Paths
-    path_h = '/home/wonseok'
+    from main_path import MAIN_PATH
+    path_h = MAIN_PATH()
     path_wikisql = os.path.join(path_h, 'data', 'wikisql_tok')
+    
     BERT_PT_PATH = path_wikisql
 
     path_save_for_evaluation = './'
@@ -567,6 +597,7 @@ if __name__ == '__main__':
     #     collate_fn=lambda x: x  # now dictionary values are not merged!
     # )
     ## 4. Build & Load models
+
     model, model_bert, tokenizer, bert_config = get_models(args, BERT_PT_PATH)
 
     ## 4.1.
