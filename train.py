@@ -283,6 +283,12 @@ def train(train_loader, train_table, model, model_bert, opt, bert_config, tokeni
             continue
 
         # score
+        # s_sc: [batch, max_table_header_number]
+        # s_sa: [batch, n_agg_ops]
+        # s_wn: [batch, max_where_condition_in_wikisql + 1] +1 for when no conditon. So, it can become a classification problem.
+        # s_wc: [batch, max_table_header_number]
+        # s_wo: [batch, max_where_condition_in_wikisql, n_cond_ops]
+        # s_wv: [batch, max_where_condition_in_wikisql, max_NL_Len_in_batch, 2]
         s_sc, s_sa, s_wn, s_wc, s_wo, s_wv = model(wemb_n, l_n, wemb_h, l_hpu, l_hs,
                                                    g_sc=g_sc, g_sa=g_sa, g_wn=g_wn, g_wc=g_wc, g_wvi=g_wvi)
 
@@ -584,7 +590,7 @@ if __name__ == '__main__':
     
     BERT_PT_PATH = path_wikisql
 
-    path_save_for_evaluation = './'
+    path_save_for_evaluation = os.path.join(path_h, 'out',)
 
     ## 3. Load data
     train_data, train_table, dev_data, dev_table, train_loader, dev_loader = get_data(path_wikisql, args)
@@ -651,8 +657,6 @@ if __name__ == '__main__':
         # save results for the official evaluation
         save_for_evaluation(path_save_for_evaluation, results_dev, 'dev')
 
-
-
         # save best model
         # Based on Dev Set logical accuracy lx
         acc_lx_t = acc_dev[-2]
@@ -661,9 +665,9 @@ if __name__ == '__main__':
             epoch_best = epoch
             # save best model
             state = {'model': model.state_dict()}
-            torch.save(state, os.path.join('.', 'model_best.pt') )
+            torch.save(state, os.path.join(path_h, 'out', 'model_best.pt') )
 
             state = {'model_bert': model_bert.state_dict()}
-            torch.save(state, os.path.join('.', 'model_bert_best.pt'))
+            torch.save(state, os.path.join(path_h, 'out', 'model_bert_best.pt'))
  
         print(f" Best Dev lx acc: {acc_lx_t_best} at epoch: {epoch_best}")

@@ -29,12 +29,12 @@ class Seq2SQL_v1(nn.Module):
         self.n_cond_ops = n_cond_ops
         self.n_agg_ops = n_agg_ops
 
-        self.wcp = WCP(iS, hS, lS, dr)
+        #self.wcp = WCP(iS, hS, lS, dr)
         self.scp = SCP(iS, hS, lS, dr)
         self.sap = SAP(iS, hS, lS, dr, n_agg_ops, old=old)
         self.wnp = WNP(iS, hS, lS, dr)
         self.wcp = WCP(iS, hS, lS, dr)
-        self.wop = WOP(iS, hS, lS, dr, n_cond_ops)
+        self.wop = WOP(iS, hS, lS, dr, n_cond_ops)  # n_cond_ops = 4.
         self.wvp = WVP_se(iS, hS, lS, dr, n_cond_ops, old=old) # start-end-search-discriminative model
 
 
@@ -56,7 +56,7 @@ class Seq2SQL_v1(nn.Module):
         """
 
 
-        # sc
+        # select column:
         s_sc = self.scp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, show_p_sc=show_p_sc)
 
         if g_sc:
@@ -64,7 +64,7 @@ class Seq2SQL_v1(nn.Module):
         else:
             pr_sc = pred_sc(s_sc)
 
-        # sa
+        # select agg operator
         s_sa = self.sap(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, pr_sc, show_p_sa=show_p_sa)
         if g_sa:
             # it's not necessary though.
@@ -297,6 +297,10 @@ class Seq2SQL_v1(nn.Module):
 class SCP(nn.Module):
     """
     Select Column Process
+    Structure:
+        NL           -> LSTM -> |
+                                | -> Memory Neural Network -> out
+        Table_Header -> LSTM -> |
     """
     def __init__(self, iS=300, hS=100, lS=2, dr=0.3):
         super(SCP, self).__init__()
@@ -329,20 +333,21 @@ class SCP(nn.Module):
                         hc0=None,
                         last_only=False)  # [b, n, dim]
 
-        wenc_hs = encode_hpu(self.enc_h, wemb_hpu, l_hpu, l_hs)  # [b, hs, dim]
+        wenc_hs = encode_hpu(self.enc_h, wemb_hpu, l_hpu, l_hs)  # [b, header_len=seq_len, dim]
 
-        bS = len(l_hs)
-        mL_n = max(l_n)
+        # bS = len(l_hs)
+        mL_n = max(l_n) # equal to wenc_n.size(-2)
 
         #   [bS, mL_hs, 100] * [bS, 100, mL_n] -> [bS, mL_hs, mL_n]
         att_h = torch.bmm(wenc_hs, self.W_att(wenc_n).transpose(1, 2))
 
-        #   Penalty on blank parts
+        #   Penalty on blank parts. similar to mask process
         for b, l_n1 in enumerate(l_n):
             if l_n1 < mL_n:
                 att_h[b, :, l_n1:] = -10000000000
 
         p_n = self.softmax_dim2(att_h)
+
         if show_p_sc:
             # p = [b, hs, n]
             if p_n.shape[0] != 1:
@@ -364,11 +369,14 @@ class SCP(nn.Module):
             show()
 
 
-
         #   p_n [ bS, mL_hs, mL_n]  -> [ bS, mL_hs, mL_n, 1]
         #   wenc_n [ bS, mL_n, 100] -> [ bS, 1, mL_n, 100]
         #   -> [bS, mL_hs, mL_n, 100] -> [bS, mL_hs, 100]
-        c_n = torch.mul(p_n.unsqueeze(3), wenc_n.unsqueeze(1)).sum(dim=2)
+        c_n = torch.mul(p_n.unsqueeze(3), wenc_n.unsqueeze(1)).sum(dim=2) # c_n is attention, p_n is key.
+
+        # In memory neural network, we will put attention and query to the DNN.
+        # So, here wenc_hs is the query. wenc_hs + wenc_n = key. wenc_n is vaule. Value not equal to Query.
+        # This is exact the same as memory neural network.
 
         vec = torch.cat([self.W_c(c_n), self.W_hs(wenc_hs)], dim=2)
         s_sc = self.sc_out(vec).squeeze(2) # [bS, mL_hs, 1] -> [bS, mL_hs]
@@ -383,6 +391,11 @@ class SCP(nn.Module):
 
 
 class SAP(nn.Module):
+    """
+    Select Agg Process
+    Similar to SCP.
+    Different is in the final step, here dose not contain wenc_hs for final sc_out. Maybe agg dose not relative to table name.
+    """
     def __init__(self, iS=300, hS=100, lS=2, dr=0.3, n_agg_ops=-1, old=False):
         super(SAP, self).__init__()
         self.iS = iS
@@ -458,6 +471,10 @@ class SAP(nn.Module):
 
 
 class WNP(nn.Module):
+    """
+    Where Number Process
+
+    """
     def __init__(self, iS=300, hS=100, lS=2, dr=0.3, ):
         super(WNP, self).__init__()
         self.iS = iS
@@ -507,6 +524,12 @@ class WNP(nn.Module):
                 att_h[b, l_hs1:] = -10000000000
         p_h = self.softmax_dim1(att_h)
 
+        #   [B, mL_hs, 100] * [ B, mL_hs, 1] -> [B, mL_hs, 100] -> [B, 100]
+        c_hs = torch.mul(wenc_hs, p_h.unsqueeze(2)).sum(1)
+
+        # Now every (a whole) table become a vector.
+        # This vector will become the first hidden state of NL encoder.
+
         if show_p_wn:
             if p_h.shape[0] != 1:
                 raise Exception("Batch size should be 1.")
@@ -519,9 +542,6 @@ class WNP(nn.Module):
             fig.canvas.draw()
             show()
             # input('Type Eenter to continue.')
-
-        #   [B, mL_hs, 100] * [ B, mL_hs, 1] -> [B, mL_hs, 100] -> [B, 100]
-        c_hs = torch.mul(wenc_hs, p_h.unsqueeze(2)).sum(1)
 
         #   [B, 100] --> [B, 2*100] Enlarge because there are two layers.
         hidden = self.W_hidden(c_hs)  # [B, 4, 200/2]
@@ -567,6 +587,9 @@ class WNP(nn.Module):
         return s_wn
 
 class WCP(nn.Module):
+    """
+    Where Column Process
+    """
     def __init__(self, iS=300, hS=100, lS=2, dr=0.3):
         super(WCP, self).__init__()
         self.iS = iS
@@ -635,6 +658,8 @@ class WCP(nn.Module):
             fig.tight_layout()
             fig.canvas.draw()
             show()
+
+
         # max nlu context vectors
         # [bS, mL_hs, mL_n]*[bS, mL_hs, mL_n]
         wenc_n = wenc_n.unsqueeze(1)  # [ b, n, dim] -> [b, 1, n, dim]
@@ -652,7 +677,7 @@ class WCP(nn.Module):
 
 
 class WOP(nn.Module):
-    def __init__(self, iS=300, hS=100, lS=2, dr=0.3, n_cond_ops=3):
+    def __init__(self, iS=300, hS=100, lS=2, dr=0.3, n_cond_ops=3): # n_cond_ops = 4 in train.py
         super(WOP, self).__init__()
         self.iS = iS
         self.hS = hS
@@ -689,11 +714,10 @@ class WOP(nn.Module):
                             hc0=None,
                             last_only=False)  # [b, n, dim]
 
-        wenc_hs = encode_hpu(self.enc_h, wemb_hpu, l_hpu, l_hs)  # [b, hs, dim]
+        wenc_hs = encode_hpu(self.enc_h, wemb_hpu, l_hpu, l_hs)  # [b, batch_table_header_max_length, dim]
 
-        bS = len(l_hs)
+        bS = len(l_hs) # Batch_size
         # wn
-
 
         wenc_hs_ob = [] # observed hs
         for b in range(bS):
@@ -704,7 +728,7 @@ class WOP(nn.Module):
             wenc_hs_ob1 = torch.stack(real + pad) # It is not used in the loss function.
             wenc_hs_ob.append(wenc_hs_ob1)
 
-        # list to [B, 4, dim] tensor.
+        # list to [B, 4, dim] tensor. 4 is the max condition number in wikisql
         wenc_hs_ob = torch.stack(wenc_hs_ob) # list to tensor.
         wenc_hs_ob = wenc_hs_ob.to(device)
 
@@ -720,8 +744,9 @@ class WOP(nn.Module):
         for b, l_n1 in enumerate(l_n):
             if l_n1 < mL_n:
                 att[b, :, l_n1:] = -10000000000
-
         p = self.softmax_dim2(att)  # p( n| selected_col )
+
+
         if show_p_wo:
             # p = [b, hs, n]
             if p.shape[0] != 1:
@@ -752,7 +777,7 @@ class WOP(nn.Module):
         vec = torch.cat([self.W_c(c_n), self.W_hs(wenc_hs_ob)], dim=2)
         s_wo = self.wo_out(vec)
 
-        return s_wo
+        return s_wo # [batch, max where condition number in wikisql, n_cond_ops]
 
 class WVP_se(nn.Module):
     """
@@ -806,7 +831,20 @@ class WVP_se(nn.Module):
         self.softmax_dim2 = nn.Softmax(dim=2)
 
     def forward(self, wemb_n, l_n, wemb_hpu, l_hpu, l_hs, wn, wc, wo, wenc_n=None, show_p_wv=False):
+        """
 
+        :param wemb_n:
+        :param l_n:
+        :param wemb_hpu:
+        :param l_hpu:
+        :param l_hs:
+        :param wn:
+        :param wc:
+        :param wo: # list of where operator, len = batch; such as: <class 'list'>: [[3], [], [3], [3], [3], [3, 3], [3], [3, 3]] when batch = 8
+        :param wenc_n:
+        :param show_p_wv:
+        :return:
+        """
         # Encode
         if not wenc_n:
             wenc_n, hout, cout = encode(self.enc_n, wemb_n, l_n,
@@ -828,7 +866,7 @@ class WVP_se(nn.Module):
             wenc_hs_ob1 = torch.stack(real + pad)  # It is not used in the loss function.
             wenc_hs_ob.append(wenc_hs_ob1)
 
-        # list to [B, 4, dim] tensor.
+        # # list to [B, 4, dim] tensor. 4 is the max condition number in wikisql
         wenc_hs_ob = torch.stack(wenc_hs_ob)  # list to tensor.
         wenc_hs_ob = wenc_hs_ob.to(device)
 
@@ -896,7 +934,7 @@ class WVP_se(nn.Module):
 
             wenc_op.append(wenc_op1)
 
-        # list to [B, 4, dim] tensor.
+        # list to [B, 4=max_where_cond_in_wikisql, n_cond_ops] tensor.
         wenc_op = torch.stack(wenc_op)  # list to tensor.
         wenc_op = wenc_op.to(device)
 
@@ -904,21 +942,27 @@ class WVP_se(nn.Module):
         # [bS, 5-1, 3*hS] = [bS, 4, 300]
         vec = torch.cat([self.W_c(c_n), self.W_hs(wenc_hs_ob), self.W_op(wenc_op)], dim=2)
 
+
+
         # Make extended vector based on encoded nl token containing column and operator information.
         # wenc_n = [bS, mL, 100]
-        # vec2 = [bS, 4, mL, 400]
-        vec1e = vec.unsqueeze(2).expand(-1,-1, mL_n, -1) # [bS, 4, 1, 300]  -> [bS, 4, mL, 300]
+        # vec2 = [bS, 4, mL, 400]. 4=max_where_cond_in_wikisql
+
+        # vec2 give every condition all the NL and a (same) vector.
+        # NL = {word_1, word_2, ... }. NL and a vector = {word_1&vector, word_2&vector, ... }
+        # one word_*&vector is the 4th dimension of the vec2.
+        vec1e = vec.unsqueeze(2).expand(-1,-1, mL_n, -1) # [bS, 4, 1, 300]  -> [bS, 4, mL_n, 300] mL_n is the max of NL
         wenc_ne = wenc_n.unsqueeze(1).expand(-1, 4, -1, -1) # [bS, 1, mL, 100] -> [bS, 4, mL, 100]
-        vec2 = torch.cat( [vec1e, wenc_ne], dim=3)
+        vec2 = torch.cat( [vec1e, wenc_ne], dim=3) # [bS, 4, mL_n, 400]
 
         # now make logits
         s_wv = self.wv_out(vec2) # [bS, 4, mL, 400] -> [bS, 4, mL, 2]
 
-        # penalty for spurious tokens
+        # penalty for spurious NL tokens
         for b, l_n1 in enumerate(l_n):
             if l_n1 < mL_n:
                 s_wv[b, :, l_n1:, :] = -10000000000
-        return s_wv
+        return s_wv # give every NL token a condition output start-end value
 
 def Loss_sw_se(s_sc, s_sa, s_wn, s_wc, s_wo, s_wv, g_sc, g_sa, g_wn, g_wc, g_wo, g_wvi):
     """
