@@ -25,7 +25,7 @@ class Seq2SQL_v1(nn.Module):
         self.ls = lS    # layer size = 2
         self.dr = dr    # dropout
 
-        self.max_wn = 4
+        self.max_wn = 4 # max where column number in wikisql
         self.n_cond_ops = n_cond_ops
         self.n_agg_ops = n_agg_ops
 
@@ -109,44 +109,54 @@ class Seq2SQL_v1(nn.Module):
                      show_p_wn=False, show_p_wc=False, show_p_wo=False, show_p_wv=False):
         """
         Execution-guided beam decoding.
+        tb   : table header with content
         """
         # sc
         s_sc = self.scp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, show_p_sc=show_p_sc)
-        prob_sc = F.softmax(s_sc, dim=-1)
+        prob_sc = F.softmax(s_sc, dim=-1)   #training do not have softmax.
+
         bS, mcL = s_sc.shape
 
         # minimum_hs_length = min(l_hs)
         # beam_size = minimum_hs_length if beam_size > minimum_hs_length else beam_size
 
         # sa
-        # Construct all possible sc_sa_score
-        prob_sc_sa = torch.zeros([bS, beam_size, self.n_agg_ops]).to(device)
+        # Construct all possible sc_sa_score to prob_sca. U should read the for loop to understand.
+        prob_sc_sa = torch.zeros([bS, beam_size, self.n_agg_ops]).to(device) # prob_sc_sa is the probability based on pr_sc
         prob_sca = torch.zeros_like(prob_sc_sa).to(device)
 
-        # get the top-k indices.  pr_sc_beam = [B, beam_size]
+        # get the top-k indices. The most likely select column. pr_sc_beam = [B, beam_size]
         pr_sc_beam = pred_sc_beam(s_sc, beam_size)
 
         # calculate and predict s_sa.
         for i_beam in range(beam_size):
-            pr_sc = list( array(pr_sc_beam)[:,i_beam] )
-            s_sa = self.sap(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, pr_sc, show_p_sa=show_p_sa)
-            prob_sa = F.softmax(s_sa, dim=-1)
-            prob_sc_sa[:, i_beam, :] = prob_sa
+            pr_sc = list( array(pr_sc_beam)[:,i_beam] ) # one predict from one beam
+            s_sa = self.sap(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, pr_sc, show_p_sa=show_p_sa) # use the beam predict to get agg
+            prob_sa = F.softmax(s_sa, dim=-1)  # prob_sa based on pr_sc which is not the only predict
+            prob_sc_sa[:, i_beam, :] = prob_sa # prob_sc_sa[:, 0, :] will be the probability of every agg based on the most prossible select column
 
-            prob_sc_selected = prob_sc[range(bS), pr_sc] # [B]
-            prob_sca[:,i_beam,:] =  (prob_sa.t() * prob_sc_selected).t()
-            # [mcL, B] * [B] -> [mcL, B] (element-wise multiplication)
-            # [mcL, B] -> [B, mcL]
+            prob_sc_selected = prob_sc[range(bS), pr_sc] # probality of the pr_sc. shape(1D): [batch] since pr_sc is only one column.
+
+            # (prob_sa.t() * prob_sc_selected).t(): shape: [batch, self.n_agg_ops];
+            # the first dimension[0,:]: [ P(pr_sc)*P(agg_ops_1), P(pr_sc)*P(agg_ops_2), ..., P(pr_sc)*P(agg_ops_6)]
+            # if beam_size = 4, we will have four array, it will be 4*6 = 24 P(pr_sc)*P(agg_ops_*).
+            # Every beam contain the same P(agg_ops_*) but different P(pr_sc). So, there will be 24 different value.
+            prob_sca[:,i_beam,:] =  (prob_sa.t() * prob_sc_selected).t() # t(): transposes dimensions 0 and 1.
+            # (prob_sa.t() * prob_sc_selected): [mcL, B] * [B] -> [mcL, B] (element-wise multiplication)
+            # final .t() behind (prob_sa.t() * prob_sc_selected): [mcL, B] -> [B, mcL]
+
 
         # Calculate the dimension of tensor
         # tot_dim = len(prob_sca.shape)
 
         # First flatten to 1-d
-        idxs = topk_multi_dim(torch.tensor(prob_sca), n_topk=beam_size, batch_exist=True)
+        idxs = topk_multi_dim(torch.tensor(prob_sca), n_topk=beam_size, batch_exist=True) # get the top four(beam size) from prob_sca
         # Now as sc_idx is already sorted, re-map them properly.
 
         idxs = remap_sc_idx(idxs, pr_sc_beam) # [sc_beam_idx, sa_idx] -> [sc_idx, sa_idx]
         idxs_arr = array(idxs)
+
+
         # [B, beam_size, remainig dim]
         # idxs[b][0] gives first probable [sc_idx, sa_idx] pairs.
         # idxs[b][1] gives of second.
@@ -158,13 +168,14 @@ class Seq2SQL_v1(nn.Module):
             pr_sc = idxs_arr[range(bS),beam_idx_sca,0]
             pr_sa = idxs_arr[range(bS),beam_idx_sca,1]
 
-            # map index properly
-
+            # check the pr_sc and pr_sa is available in the table.
+            # For example, "select sum(column) ..." is not available when column is text type.
+            # This is EG!!!
             check = check_sc_sa_pairs(tb, pr_sc, pr_sa)
 
             if sum(check) == bS:
                 break
-            else:
+            else: # update some part of beam_idx_sca when its check is False. And then run a again while loop, get different predict.
                 for b, check1 in enumerate(check):
                     if not check1: # wrong pair
                         beam_idx_sca[b] += 1
@@ -177,24 +188,31 @@ class Seq2SQL_v1(nn.Module):
             if sum(beam_meet_the_final) == bS:
                 break
 
-
         # Now pr_sc, pr_sa are properly predicted.
         pr_sc_best = list(pr_sc)
         pr_sa_best = list(pr_sa)
+
+
+
+
+
 
         # Now, Where-clause beam search.
         s_wn = self.wnp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, show_p_wn=show_p_wn)
         prob_wn = F.softmax(s_wn, dim=-1).detach().to('cpu').numpy()
 
         # Found "executable" most likely 4(=max_num_of_conditions) where-clauses.
-        # wc
+        # wc does not base on wn
         s_wc = self.wcp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, show_p_wc=show_p_wc, penalty=True)
         prob_wc = F.sigmoid(s_wc).detach().to('cpu').numpy()
         # pr_wc_sorted_by_prob = pred_wc_sorted_by_prob(s_wc)
 
         # get max_wn # of most probable columns & their prob.
         pr_wn_max = [self.max_wn]*bS
-        pr_wc_max = pred_wc(pr_wn_max, s_wc) # if some column do not have executable where-claouse, omit that column
+        pr_wc_max = pred_wc(pr_wn_max, s_wc)    # Since it consider the max where column number is 4, so just get the top 4 possible column
+        # if some column do not have executable where-claouse, omit that column
+
+
         prob_wc_max = zeros([bS, self.max_wn])
         for b, pr_wc_max1 in enumerate(pr_wc_max):
             prob_wc_max[b,:] = prob_wc[b,pr_wc_max1]

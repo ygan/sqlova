@@ -40,7 +40,8 @@ except ImportError:
 #     #                                           os.path.join(os.path.expanduser("~"), '.pytorch_pretrained_bert'))
 
 from pathlib import Path
-PYTORCH_PRETRAINED_BERT_CACHE='/home/yj/Documents/Python/Github/pytorch-pretrained-BERT/.pytorch_pretrained_bert'
+from main_path import BERT_PATH
+PYTORCH_PRETRAINED_BERT_CACHE = BERT_PATH()
 
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name

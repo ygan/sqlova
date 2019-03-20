@@ -26,9 +26,9 @@ def topk_multi_dim(tensor, n_topk=1, batch_exist=True):
 
     if batch_exist:
         idxs = []
-        for b, tensor1 in enumerate(tensor):
+        for b, tensor1 in enumerate(tensor): # b is batch number
             idxs1 = []
-            tensor1_1d = tensor1.reshape(-1)
+            tensor1_1d = tensor1.reshape(-1)    # become one dimension
             values_1d, idxs_1d = tensor1_1d.topk(k=n_topk)
             idxs_list = unravel_index(idxs_1d.cpu().numpy(), tensor1.shape)
             # (dim0, dim1, dim2, ...)
