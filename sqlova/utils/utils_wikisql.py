@@ -1048,13 +1048,19 @@ def pred_wvi_se(wn, s_wv):
 
 def pred_wvi_se_beam(max_wn, s_wv, beam_size):
     """
-    s_wv: [B, 4, mL, 2]
-    - predict best st-idx & ed-idx
+    s_wv: [B, 4, maxLen_NL, 2]
+    - predict best start-idx & end-idx
 
+    This function will split s_wv for start index and end index first.
+    And then get the top 'sqrt(beam_size)' probability of these start and end data. Why not get top beam_size/2? Because:
+    Then crossly combine these data. For example: [a,b] crossly combine [c,d] = [ac, ad, bc, bd]. That is why get 'sqrt(beam_size)'.
+    So, finally we will get these combine index: pr_wvi_beam [[a,c],[a,d],[b,c],[b,d]]
+    and their probability: prob_wvi_beam [P(ac), P(ad), P(bc), P(bd)].
+    So, pr_wvi_beam and prob_wvi_beam have different shape.
 
     output:
     pr_wvi_beam = [B, max_wn, n_pairs, 2]. 2 means [st, ed].
-    prob_wvi_beam = [B, max_wn, n_pairs]
+    prob_wvi_beam = [B, max_wn, n_pairs]                           # PS: n_pairs similar to beam size
     """
     bS = s_wv.shape[0]
 
@@ -1066,8 +1072,8 @@ def pred_wvi_se_beam(max_wn, s_wv, beam_size):
     prob_wv_st = F.softmax(s_wv_st, dim=-1).detach().to('cpu').numpy()
     prob_wv_ed = F.softmax(s_wv_ed, dim=-1).detach().to('cpu').numpy()
 
-    k_logit = int(ceil(sqrt(beam_size)))
-    n_pairs = k_logit**2
+    k_logit = int(ceil(sqrt(beam_size)))  # sqrt and then become integrator
+    n_pairs = k_logit**2                  # real beam size for here
     assert n_pairs >= beam_size
     values_st, idxs_st = s_wv_st.topk(k_logit) # [B, 4, mL] -> [B, 4, k_logit]
     values_ed, idxs_ed = s_wv_ed.topk(k_logit) # [B, 4, mL] -> [B, 4, k_logit]

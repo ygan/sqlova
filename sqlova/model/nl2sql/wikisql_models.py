@@ -209,63 +209,84 @@ class Seq2SQL_v1(nn.Module):
 
         # get max_wn # of most probable columns & their prob.
         pr_wn_max = [self.max_wn]*bS
-        pr_wc_max = pred_wc(pr_wn_max, s_wc)    # Since it consider the max where column number is 4, so just get the top 4 possible column
+        pr_wc_max = pred_wc(pr_wn_max, s_wc)    # Since it consider the max where column number is 4, so just get the top 4 possible column index
         # if some column do not have executable where-claouse, omit that column
 
 
-        prob_wc_max = zeros([bS, self.max_wn])
+        prob_wc_max = zeros([bS, self.max_wn])  # top 4 column probability. data:[batch, top4=self.max_wn]
         for b, pr_wc_max1 in enumerate(pr_wc_max):
             prob_wc_max[b,:] = prob_wc[b,pr_wc_max1]
 
-        # get most probable max_wn where-clouses
-        # wo
+        # Here, suppose we have 4 where column. So, we need 4 operator:
         s_wo_max = self.wop(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, wn=pr_wn_max, wc=pr_wc_max, show_p_wo=show_p_wo)
         prob_wo_max = F.softmax(s_wo_max, dim=-1).detach().to('cpu').numpy()
-        # [B, max_wn, n_cond_op]
+        # [B, max_wn, n_cond_ops]: (batch, where_column_number, condition_operator_number)
 
+        # Get value for operator:
         pr_wvi_beam_op_list = []
         prob_wvi_beam_op_list = []
         for i_op  in range(self.n_cond_ops-1):
             pr_wo_temp = [ [i_op]*self.max_wn ]*bS
-            # wv
-            s_wv = self.wvp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, wn=pr_wn_max, wc=pr_wc_max, wo=pr_wo_temp, show_p_wv=show_p_wv)
-            prob_wv = F.softmax(s_wv, dim=-2).detach().to('cpu').numpy()
 
-            # prob_wv
+            # Suppose there are 4 where columns and all operator is the same as 'i_op'
+            # The where column number is the most probability number. (Maybe wrong number)
+            # s_wv give every NL token a condition output start-end value.
+            # So the shape of s_wv: [batch, where_column_NO.(max_where_num), max_len_NL_in_Batch, 2].
+            # The final dim of it is the prob of start and end for certain NL token. So one word can be start and end on the same time.
+            s_wv = self.wvp(wemb_n, l_n, wemb_hpu, l_hpu, l_hs, wn=pr_wn_max, wc=pr_wc_max, wo=pr_wo_temp, show_p_wv=show_p_wv)
+            # prob_wv = F.softmax(s_wv, dim=-2).detach().to('cpu').numpy()
+
+            # pr_wvi_beam: index of predict pair; prob_wvi_beam: probability of the pair; both based on the same where operator
+            # You can check comments inside the pred_wvi_se_beam.
+            # pr_wvi_beam = [B, max_wn, n_pairs(beam_size), 2]. 2 means [st, ed] paris.
+            # prob_wvi_beam = [B, max_wn, n_pairs(beam_size)]
+            # So we get n_pairs(beam_size) value (one value is a pair) for a (operator + column)
             pr_wvi_beam, prob_wvi_beam = pred_wvi_se_beam(self.max_wn, s_wv, beam_size)
             pr_wvi_beam_op_list.append(pr_wvi_beam)
             prob_wvi_beam_op_list.append(prob_wvi_beam)
-            # pr_wvi_beam = [B, max_wn, k_logit**2 [st, ed] paris]
 
-            # pred_wv_beam
+
+        # To here, we suppose we have the max(4) where column.
+        # 1. Then we get 4 condition column number: pr_wc_max and its probability: prob_wc_max.
+        # 2. Then we get the probability of all operator in 4 column: prob_wo_max.
+        # 3. Then we get the top beam_size probability of where value based on 4 column, pr_wc_max and all-operators, which is pr_wvi_beam_op_list and prob_wvi_beam_op_list
+        # Next step, we should the real data from these three data that should be the max probability data.
+
+        # n_pairs(n_wv_beam_pairs) similar to beam size. You can cosider it as beam size for following program
+        n_wv_beam_pairs = prob_wvi_beam.shape[2]
 
         # Calculate joint probability of where-clause
-        # prob_w = [batch, wc, wo, wv] = [B, max_wn, n_cond_op, n_pairs]
-        n_wv_beam_pairs = prob_wvi_beam.shape[2]
+        # prob_w = [batch, wc, wo, wv] = [B, max_wn(4), n_cond_ops-1, n_pairs]
         prob_w = zeros([bS, self.max_wn, self.n_cond_ops-1, n_wv_beam_pairs])
         for b in range(bS):
             for i_wn in range(self.max_wn):
-                for i_op in range(self.n_cond_ops-1): # do not use final one
-                    for i_wv_beam in range(n_wv_beam_pairs):
-                        # i_wc = pr_wc_max[b][i_wn] # already done
+                for i_op in range(self.n_cond_ops-1): # do not use final one that is empty
+                    for i_wv_beam in range(n_wv_beam_pairs): # n_wv_beam_pairs is similar to beam_size
                         p_wc = prob_wc_max[b, i_wn]
                         p_wo = prob_wo_max[b, i_wn, i_op]
                         p_wv = prob_wvi_beam_op_list[i_op][b, i_wn, i_wv_beam]
 
                         prob_w[b, i_wn, i_op, i_wv_beam] = p_wc * p_wo * p_wv
 
+
         # Perform execution guided decoding
         conds_max = []
         prob_conds_max = []
         # while len(conds_max) < self.max_wn:
+        # prob_w's shape is []
         idxs = topk_multi_dim(torch.tensor(prob_w), n_topk=beam_size, batch_exist=True)
-        # idxs = [B, i_wc_beam, i_op, i_wv_pairs]
+        # idxs = [[B], [i_wc_beam], [i_wc, i_op, i_wv_pairs]]
+        # So, there maybe same where column in data of idxs.
+        # For example, it may be consider: 'where column3 = 3' and 'where column3 = number 3' is very high.
+        # So these two column may appear in idx at the same time due to their probability.
+        # Actually, we should keep only one of the same columns in the final SQL query if wikisql designed on different where column.
 
-        # Construct conds1
-        for b, idxs1 in enumerate(idxs):
+        # EG the idxs on database. check whether it can find data or not.
+        # This EG assume that all condition connect on 'and'. But it only appear for SQLWIKI.
+        for b, idxs1 in enumerate(idxs): # batch loop
             conds_max1 = []
             prob_conds_max1 = []
-            for i_wn, idxs11 in enumerate(idxs1):
+            for i_wn, idxs11 in enumerate(idxs1): # beam(i_wc_beam) loop:
                 i_wc = pr_wc_max[b][idxs11[0]]
                 i_op = idxs11[1]
                 wvi = pr_wvi_beam_op_list[i_op][b][idxs11[0]][idxs11[2]]
@@ -291,6 +312,7 @@ class Seq2SQL_v1(nn.Module):
             # May need to do more exhuastive search?
             # i.e. up to.. getting all executable cases.
 
+        #After EG, find the max conbining probability between idxs and where condition number(w_n).
         # Calculate total probability to decide the number of where-clauses
         pr_sql_i = []
         prob_wn_w = []
@@ -301,7 +323,11 @@ class Seq2SQL_v1(nn.Module):
             prob_wn_w1 = []
             prob_wn_w1.append(prob_wn1[0])  # wn=0 case.
             for i_wn in range(max_executable_wn1):
+                # I think it is not very good here.
                 prob_wn_w11 = prob_wn1[i_wn+1] * prob_conds_max[b][i_wn]
+                # prob_wn_w1 become: [{probability of 0 where_column(w_n)}, {probability of (1 w_n)*max_prob_where_condition}, {probability of (2 w_n)*Second_max_prob_where_condition}, ...]
+                # It make sense and performance is good, because: if real w_n=3, the top 3 max_prob_where_condition will be not low. But probability of w_n except 2 will be low.
+                # But why not use probability of w_n instead of these complex caculation. So I think it is not very good but it make sense.
                 prob_wn_w1.append(prob_wn_w11)
             pr_wn_based_on_prob.append(argmax(prob_wn_w1))
             prob_wn_w.append(prob_wn_w1)
@@ -607,6 +633,7 @@ class WNP(nn.Module):
 class WCP(nn.Module):
     """
     Where Column Process
+    BUG: it suppose one column appear on the where condition only once
     """
     def __init__(self, iS=300, hS=100, lS=2, dr=0.3):
         super(WCP, self).__init__()
@@ -980,7 +1007,11 @@ class WVP_se(nn.Module):
         for b, l_n1 in enumerate(l_n):
             if l_n1 < mL_n:
                 s_wv[b, :, l_n1:, :] = -10000000000
-        return s_wv # give every NL token a condition output start-end value
+
+        # give every NL token a condition output start-end value
+        # So the shape of s_wv: [batch, where_column_NO., max_len_NL_in_Batch, 2].
+        # The final dim of it is the prob of start and end for certain NL token. So one word can be start and end on the same time.
+        return s_wv
 
 def Loss_sw_se(s_sc, s_sa, s_wn, s_wc, s_wo, s_wv, g_sc, g_sa, g_wn, g_wc, g_wo, g_wvi):
     """
